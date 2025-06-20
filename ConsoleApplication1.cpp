@@ -1,11 +1,14 @@
 // ConsoleApplication1.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
+// authentication code taken from Fast-DDS/src/cpp/security/authentication/PKIDH.cpp
+// https://github.com/eProsima/Fast-DDS/blob/5eefc8411c84db9fe697c5c8294ab7509373dac5/src/cpp/security/authentication/PKIDH.cpp
+
+
 #ifdef OPENSSL_API_COMPAT
 #undef OPENSSL_API_COMPAT
 #endif // ifdef OPENSSL_API_COMPAT
 #define OPENSSL_API_COMPAT 10101
 
-//#include <security/authentication/PKIDH.h>
 
 #include <openssl/opensslv.h>
 
@@ -29,9 +32,6 @@
 #include <openssl/err.h>
 #include <openssl/obj_mac.h>
 #include <openssl/evp.h>
-//
-//#include <security/artifact_providers/FileProvider.hpp>
-//#include <security/artifact_providers/Pkcs11Provider.hpp>
 
 #include <cassert>
 #include <algorithm>
@@ -70,7 +70,6 @@ static inline EVP_PKEY* generate_dh_key(
                 (1 != EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, NID_X9_62_prime256v1)) ||
                 (1 != EVP_PKEY_paramgen(pctx, &params)))
             {
-                //exception = _SecurityException_("Cannot set default parameters: ");
                 std::cout << "Cannot set default parameters: " << std::endl;
                 EVP_PKEY_CTX_free(pctx);
                 return nullptr;
@@ -78,7 +77,6 @@ static inline EVP_PKEY* generate_dh_key(
         }
         else
         {
-            //exception = _SecurityException_("Cannot allocate EVP parameters");
             std::cout << "Cannot allocate EVP parameters: " << std::endl;
             return nullptr;
         }
@@ -98,7 +96,6 @@ static inline EVP_PKEY* generate_dh_key(
                 if (EVP_PKEY_assign_DH(params, dh) <= 0)
 #endif // if IS_OPENSSL_1_1_1d
                 {
-                    //exception = _SecurityException_("Cannot set default parameters: ");
                     std::cout << "Cannot set default parameters: " << std::endl;
                     DH_free(dh);
                     EVP_PKEY_free(params);
@@ -108,14 +105,12 @@ static inline EVP_PKEY* generate_dh_key(
         }
         else
         {
-            //exception = _SecurityException_("Cannot allocate EVP parameters");
-            std::cout << "_SecurityException_: " << std::endl;
+            std::cout << "Cannot allocate EVP parameters: " << std::endl;
             return nullptr;
         }
     }
     else
     {
-        //exception = _SecurityException_("Wrong DH kind");
         std::cout << "_SecurityException_: " << std::endl;
         return nullptr;
     }
@@ -130,21 +125,19 @@ static inline EVP_PKEY* generate_dh_key(
             if (1 != EVP_PKEY_keygen(kctx, &keys))
             {
                 //exception = _SecurityException_("Cannot generate EVP key");
-                std::cout << "_SecurityException_: " << std::endl;
+                std::cout << "Cannot generate EVP key: " << std::endl;
             }
         }
         else
         {
-            //exception = _SecurityException_("Cannot init EVP key");
-            std::cout << "_SecurityException_: " << std::endl;
+            std::cout << "Cannot init EVP key: " << std::endl;
         }
 
         EVP_PKEY_CTX_free(kctx);
     }
     else
     {
-        //exception = _SecurityException_("Cannot create EVP context");
-        std::cout << "_SecurityException_: " << std::endl;
+        std::cout << "Cannot create EVP context: " << std::endl;
     }
 
     ERR_clear_error();
@@ -203,43 +196,128 @@ X509_STORE* load_ca_cert(const std::string& ca_cert_path) {
 }
 
 
+uint8_t generate_sharedsecret(
+    EVP_PKEY* private_key,
+    EVP_PKEY* public_key)
+{
+    assert(private_key);
+    assert(public_key);
+
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(private_key, NULL);
+
+    if (ctx != nullptr)
+    {
+        if (EVP_PKEY_derive_init(ctx) > 0)
+        {
+            if (EVP_PKEY_derive_set_peer(ctx, public_key) > 0)
+            {
+                size_t length = 0;
+                if (EVP_PKEY_derive(ctx, NULL, &length) > 0)
+                {
+                    std::vector<uint8_t> data;
+                    data.resize(length);
+
+                    if (EVP_PKEY_derive(ctx, data.data(), &length) > 0)
+                    {
+                        uint8_t md[32];
+                        if (EVP_Digest(data.data(), length, md, NULL, EVP_sha256(), NULL))
+                        {
+                            data.assign(md, md + 32);
+                        }
+                        else
+                        {
+                            std::cerr << "OpenSSL library failed while getting derived key" << "\n";
+                        }
+                    }
+                    else
+                    {
+                        std::cerr << "OpenSSL library cannot get derive" << "\n";
+                    }
+                }
+                else
+                {
+                    std::cerr << "OpenSSL library cannot get length" << "\n";
+                }
+            }
+            else
+            {
+                std::cerr << "OpenSSL library cannot set peer" << "\n";
+            }
+        }
+        else
+        {
+            std::cerr << "OpenSSL library cannot init derive" << "\n";
+        }
+
+        EVP_PKEY_CTX_free(ctx);
+    }
+    else
+    {
+        std::cerr << "OpenSSL library cannot allocate context" << "\n";
+    }
+
+    return 1;
+}
+
 int main()
 {
-    std::ofstream my_dh_ResultsFile;
-    my_dh_ResultsFile.open("01_dh_results_millisec.csv");
+    std::ofstream my_dh_keypair_ResultsFile;
+    std::ofstream my_dh_sharedkey_ResultsFile;
+    my_dh_keypair_ResultsFile.open("01a_dh_results_millisec.csv");
+    my_dh_sharedkey_ResultsFile.open("01b_dh_sharedkey_results_millisec.csv");
 
     std::chrono::duration<double, std::milli> duration;
+    std::chrono::duration<double, std::milli> runningTotal_dh_a{0.0};
+    std::chrono::duration<double, std::milli> runningTotal_dh_b{0.0};
+    std::chrono::duration<double, std::milli> runningTotal_identityCert{0.0};
+    std::chrono::duration<double, std::milli> runningTotal_aes_enc{0.0};
+    std::chrono::duration<double, std::milli> runningTotal_aes_dec{0.0};
+    std::chrono::duration<double, std::milli> runningTotal_permissionsCert{0.0};
 
     /////////////////////////////////
     ///// DH keypair generation /////
     /////////////////////////////////
-    int dh_loops = 100;
+    const int dh_loops = 100;
+    
     std::cout << ".....generating DH key pair " << dh_loops << " times..." << std::endl;
-    //my_dh_ResultsFile << "DH key pair Execution time (ms): " << "\n";
+
     // Start timing
     for (int i = 0; i < dh_loops; i++)
     {
         auto start = std::chrono::high_resolution_clock::now();
-        //for(int i = 1; i<100; i++)
-            //EVP_PKEY* x = generate_dh_key(EVP_PKEY_EC);
-        EVP_PKEY* x = generate_dh_key(EVP_PKEY_DH);
-        // End timing
-        //endTimer(start, "\tDH key pair Execution time: ");
+        EVP_PKEY* x = generate_dh_key(EVP_PKEY_EC);
         auto end = std::chrono::high_resolution_clock::now();
         duration = end - start;
-        //std::cout << "\tDH key pair Execution time2: " << duration.count() << " ms" << std::endl;
 
-        my_dh_ResultsFile << duration.count() << ", ";
+        my_dh_keypair_ResultsFile << duration.count() << ", ";
+        runningTotal_dh_a += duration;
+        //////////////////////////////////////////////////////////////////////////////
+
+        EVP_PKEY* x2 = generate_dh_key(EVP_PKEY_EC);
+
+        start = std::chrono::high_resolution_clock::now();
+        auto abc = generate_sharedsecret(x, x2);
+        end = std::chrono::high_resolution_clock::now();
+        duration = end - start;
+
+        my_dh_sharedkey_ResultsFile << duration.count() << ", ";
+        runningTotal_dh_b += duration;
+
+        EVP_PKEY_free(x);
     }
 
+
+
+
     std::cout << "..... DH key pair finished...\nLatest time :" << duration.count() << " ms" << std::endl;
-    my_dh_ResultsFile.close();
+    my_dh_keypair_ResultsFile.close();
+    my_dh_sharedkey_ResultsFile.close();
 
     /////////////////////////////////
     ///// x509 Cert verification/////
     /////////////////////////////////
     std::cout << ".....verifying certiciates..." << std::endl;
-    int identityCert_loops = 100;
+    const int identityCert_loops = 100;
     std::ofstream my_cert_ResultsFile;
     my_cert_ResultsFile.open("02_cert_results_millisec.csv");
     std::string cert_path = "hundred_keystores/demo_keystore_100/enclaves/talker_listener/talker/cert.pem";  // Path to client certificate
@@ -264,6 +342,7 @@ int main()
         auto end = std::chrono::high_resolution_clock::now();
         duration = end - start;
         my_cert_ResultsFile << duration.count() << ", ";
+        runningTotal_identityCert += duration;
 
         X509_STORE_CTX_free(ctx);
         X509_STORE_free(store);
@@ -289,7 +368,7 @@ int main()
     ///// AES 256 encryption    /////
     /////////////////////////////////
     std::cout << ".....AES 256 encryption..." << std::endl;
-    int aes_loops = 100;
+    const int aes_loops = 100;
     std::ofstream my_aes_enc_ResultsFile, my_aes_dec_ResultsFile;
     my_aes_enc_ResultsFile.open("04_aes_encrypt_results_millisec.csv");
     my_aes_dec_ResultsFile.open("05_aes_decrypt_results_millisec.csv");
@@ -302,9 +381,9 @@ int main()
     std::vector<unsigned char> plaintext_in(inputText.begin(), inputText.end());
     std::cout << "input text: " << inputText << std::endl;
 
-    for (int i = 0; i < 100; i++)
+    for (int i = 0; i < aes_loops; i++)
     {
-        if (RAND_bytes(key, sizeof(key)) != 1 || RAND_bytes(iv, sizeof(iv)) != 1) 
+        if (RAND_bytes(key, sizeof(key)) != 1 || RAND_bytes(iv, sizeof(iv)) != 1)
             return 1;
 
         auto start = std::chrono::high_resolution_clock::now();
@@ -333,13 +412,14 @@ int main()
         auto end = std::chrono::high_resolution_clock::now();
         duration = end - start;
         my_aes_enc_ResultsFile << duration.count() << ", ";
+        runningTotal_aes_enc += duration;
 
         EVP_CIPHER_CTX_free(ctx_enc);
 
 
-    /////////////////////////////////
-    ///// AES 256 decryption    /////
-    /////////////////////////////////
+        /////////////////////////////////
+        ///// AES 256 decryption    /////
+        /////////////////////////////////
 
 
         start = std::chrono::high_resolution_clock::now();
@@ -371,6 +451,7 @@ int main()
         end = std::chrono::high_resolution_clock::now();
         duration = end - start;
         my_aes_dec_ResultsFile << duration.count() << ", ";
+        runningTotal_aes_dec += duration;
     }
 
     std::cout << "aes enc complete sample time: " << duration.count() << " ms" << std::endl;
@@ -383,7 +464,7 @@ int main()
     ///// PKCS7 permisions verify /////
     /////////////////////////////////
 
-    int permissionsCert_loops = 100;
+    const int permissionsCert_loops = 100;
     std::ofstream permissions_ResultsFile;
     permissions_ResultsFile.open("03_plcs7_permissions_results_millisec.csv");
 
@@ -413,12 +494,23 @@ int main()
         auto end = std::chrono::high_resolution_clock::now();
         duration = end - start;
         permissions_ResultsFile << duration.count() << ", ";
+        runningTotal_permissionsCert += duration;
 
         X509_STORE_CTX_free(ctx);
         X509_STORE_free(store);
     }
     permissions_ResultsFile.close();
 
+
+
+    std::cout << "Mean DH keypair generation time (us): " << 1000.0 * runningTotal_dh_a.count()/double(dh_loops) << std::endl;
+    std::cout << "Mean DH shared secret generation time (us): " << 1000.0 * runningTotal_dh_b.count()/ double(dh_loops) << std::endl;
+    std::cout << "Mean x509 certificate verification time (us): " << 1000.0 * runningTotal_identityCert.count()/ double(identityCert_loops) << std::endl;
+    std::cout << "Mean PKCS7 permissions verification time (us): " << 1000.0 * runningTotal_permissionsCert.count() / double(permissionsCert_loops) << std::endl;
+    std::cout << "Mean AES-256 encryption time (us): " << 1000.0 * runningTotal_aes_enc.count()/ double(aes_loops) << std::endl;
+    std::cout << "Mean AES-256 decryption time (us): " << 1000.0 * runningTotal_aes_dec.count()/ double(aes_loops) << std::endl;
+    
+    
     std::cout << "COMPLETE " << std::endl;
     return 0;
 }
